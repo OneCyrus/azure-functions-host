@@ -161,6 +161,11 @@ namespace Microsoft.Azure.WebJobs.Script.Workers
             _invokerErrors.Push(currentErrorEvent);
         }
 
+        public Task PingAsync()
+        {
+            throw new NotImplementedException();
+        }
+
         protected virtual void Dispose(bool disposing)
         {
             if (!_disposed && disposing)

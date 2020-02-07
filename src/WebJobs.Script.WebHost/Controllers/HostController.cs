@@ -12,18 +12,17 @@ using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Http;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.AspNetCore.Mvc.WebApiCompatShim;
-using Microsoft.Azure.WebJobs.Extensions.Http;
 using Microsoft.Azure.WebJobs.Host;
 using Microsoft.Azure.WebJobs.Host.Executors;
 using Microsoft.Azure.WebJobs.Host.Scale;
 using Microsoft.Azure.WebJobs.Script.ExtensionBundle;
+using Microsoft.Azure.WebJobs.Script.Extensions;
 using Microsoft.Azure.WebJobs.Script.Scale;
-using Microsoft.Azure.WebJobs.Script.WebHost.Authentication;
 using Microsoft.Azure.WebJobs.Script.WebHost.Filters;
 using Microsoft.Azure.WebJobs.Script.WebHost.Management;
 using Microsoft.Azure.WebJobs.Script.WebHost.Models;
-using Microsoft.Azure.WebJobs.Script.WebHost.Security.Authorization;
 using Microsoft.Azure.WebJobs.Script.WebHost.Security.Authorization.Policies;
+using Microsoft.Azure.WebJobs.Script.Workers;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Options;
@@ -112,10 +111,18 @@ namespace Microsoft.Azure.WebJobs.Script.WebHost.Controllers
 
         [HttpGet]
         [HttpPost]
+        [HttpOptions] // TEMP - allow Options only for testing
         [Route("admin/host/ping")]
         [ResponseCache(NoStore = true, Location = ResponseCacheLocation.None)]
-        public IActionResult Ping([FromServices] IScriptHostManager scriptHostManager)
+        public async Task<IActionResult> Ping([FromServices] IScriptHostManager scriptHostManager, [FromServices] IServiceProvider serviceProvider)
         {
+            var hostService = serviceProvider.GetRequiredService<WebJobsScriptHostService>();
+            var result = await TryHandleHttpScalePingAsync(HttpContext, _environment, hostService.Services);
+            if (result != null)
+            {
+                return result;
+            }
+
             var pingStatus = new JObject
             {
                 { "hostState", scriptHostManager.State.ToString() }
@@ -318,6 +325,50 @@ namespace Microsoft.Azure.WebJobs.Script.WebHost.Controllers
             }
 
             return NotFound();
+        }
+
+        private static async Task<IActionResult> TryHandleHttpScalePingAsync(HttpContext httpContext, IEnvironment environment, IServiceProvider services)
+        {
+            var userAgent = httpContext.Request.GetHeaderValueOrDefault("User-Agent");
+            if (userAgent.Contains(ScriptConstants.HttpScaleUserAgent))
+            {
+                string pingLatency = null;
+                if (environment.IsOutOfProc())
+                {
+                    // apply the OOP latency threshold
+                    pingLatency = ScriptConstants.OOPHttpScalePingLatencyThreshold.ToString();
+
+                    if (services is IServiceScopeFactory scopedServiceProvider)
+                    {
+                        // ping the language worker, to include any worker channel latency in the result
+                        await PingLanguageWorkerAsync(services);
+                    }
+                }
+
+                // if a latency is configured, return it to the FE
+                pingLatency = environment.GetEnvironmentVariableOrDefault(EnvironmentSettingNames.HttpScalePingLatencyThreshold, pingLatency);
+                if (!string.IsNullOrEmpty(pingLatency))
+                {
+                    httpContext.Response.Headers.Add(ScriptConstants.HttpScalePingLatencyThresholdHeader, pingLatency);
+                }
+
+                return new OkResult();
+            }
+
+            return null;
+        }
+
+        private static async Task PingLanguageWorkerAsync(IServiceProvider serviceProvider)
+        {
+            var dispatcherFactory = serviceProvider.GetService<IFunctionInvocationDispatcherFactory>();
+            if (dispatcherFactory != null)
+            {
+                var dispatcher = dispatcherFactory.GetFunctionDispatcher();
+                if (dispatcher.State == FunctionInvocationDispatcherState.Initialized)
+                {
+                    await dispatcher.PingAsync();
+                }
+            }
         }
     }
 }

@@ -26,6 +26,8 @@ namespace Microsoft.Azure.WebJobs.Script.Workers.Rpc
 
         Task StartWorkerProcessAsync();
 
+        Task PingAsync();
+
         Task DrainInvocationsAsync();
     }
 }
